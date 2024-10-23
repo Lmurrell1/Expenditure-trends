@@ -1,0 +1,183 @@
+
+
+
+#Download expenditure file from PLDR 
+RO5<-fread(normalizePath("Data/FIN_07_61L.csv"))%>%clean_names()
+
+# select env and reg services from 2009 
+
+env_reg<-RO5[,c(1:4,33:86)]  #select columns 
+env_reg<- subset(env_reg, year > 2008)
+env_reg<-rename(env_reg, "la_code"="ltla20cd")
+env_reg<-rename(env_reg, "la_name"="ltla20nm")
+
+# convert to pounds
+env_reg<-env_reg %>%
+  mutate(across(5:58, ~ . * 1000))
+
+#Deflate to account for inflation Deflated from [Gov statistics](https://www.gov.uk/government/statistics/gdp-deflators-at-market-prices-and-money-gdp-december-2021-quarterly-national-accounts)
+#r donwload deflator and merge
+
+#Download deflator 
+deflator<- read_excel("Data/GDP_deflators_2005_2020.xlsx") %>%
+  as.data.table() %>%
+  clean_names()
+
+#sort deflator
+colnames(deflator) <- c("Year","deflator")
+deflator$Year<-as.numeric(deflator$Year)
+deflator<-rename(deflator,"year"="Year")
+
+#merge deflator with er data for calculation 
+env_reg <- merge(env_reg,deflator,by="year",all.x = T)
+
+#account for inflation using deflator
+env_reg_bfd<-env_reg #save env reg before deflation (bfd)
+env_reg <- env_reg %>%
+  mutate(across(5:58, ~ . / deflator * 100))    #apply deflator accross all ER columns 
+#remove deflator
+env_reg<-env_reg[,-59]
+
+#clean names 
+#clean names for future matching : remove capital letter, spaces, punctuation, prefix and suffix
+env_reg$la_name<-gsub("UA", "", env_reg$la_name)
+env_reg$la_name = tolower(env_reg$la_name)
+env_reg$la_name<-gsub("district council","",env_reg$la_name)
+env_reg$la_name<-gsub("borough council","",env_reg$la_name)
+env_reg$la_name<-gsub("unitary council","",env_reg$la_name)
+env_reg$la_name<-gsub("council","",env_reg$la_name)
+env_reg$la_name<-gsub("unitary","",env_reg$la_name)
+env_reg$la_name<-gsub(" borough","",env_reg$la_name)
+env_reg$la_name<-gsub("district","",env_reg$la_name)
+env_reg$la_name<-gsub("mbc","",env_reg$la_name)
+env_reg$la_name<-gsub("bc","",env_reg$la_name)
+env_reg$la_name<-gsub("revised","",env_reg$la_name)
+env_reg$la_name<-gsub("\\d.c","",env_reg$la_name)
+env_reg$la_name<-gsub("county","",env_reg$la_name)
+env_reg$la_name<-gsub("regulatory service","",env_reg$la_name) 
+env_reg$la_name<-gsub("londonofbrent","brent",env_reg$la_name)
+env_reg$la_name<-gsub("cityof","",env_reg$la_name)
+env_reg$la_name<-gsub("city of ","",env_reg$la_name)
+env_reg$la_name<-gsub("city","",env_reg$la_name)
+env_reg$la_name<-gsub("kingston-upon-thames","kingstonuponthames",env_reg$la_name)
+env_reg$la_name<-gsub("kingston-upon-hull","kingstonuponhull",env_reg$la_name)
+env_reg$la_name<-gsub("newcastle-upon-tyne","newcastleupotyne",env_reg$la_name)
+env_reg$la_name<-gsub("newcastle-under-lyme","newcastleunderlyme",env_reg$la_name)
+env_reg$la_name<-gsub("stockton-on-tees","stocktonontees",env_reg$la_name)
+env_reg$la_name<-gsub("telfordwrekin","telfordthewrekin",env_reg$la_name)
+env_reg$la_name<-gsub(" telfordwrekin","telfordthewrekin",env_reg$la_name)
+
+#create Food Safety + APHIDC variable 
+
+env_reg <- env_reg %>%
+  group_by(la_code, year) %>%
+  mutate(food_safety_animal_ph = food_safety_gross + animal_and_public_health_infectious_disease_control_gross)
+
+env_reg<-as.data.table(env_reg)
+env_reg<-env_reg[la_code!="E06000053",]
+env_reg<-env_reg[la_code!="E09000001",]
+
+
+#### Input IMD and merge and create quintiles 
+
+imd_2019<-fread(normalizePath("Data/Population demographics/imd_2019.csv"))%>%clean_names()
+
+#merge env reg with imd 
+env_reg<-merge(env_reg,imd_2019,by="la_code",all.x = T)
+
+#env_reg$quint_IMD<-as.factor(env_reg$quint_IMD)
+#weight by pop size
+class(env_reg$imd_average_score)
+env_reg$pop_est_total<-as.numeric(env_reg$pop_est_total)
+env_reg$quint_imd <- xtile(env_reg$imd_average_score, 5, 
+                                    wt = env_reg$pop_est_total)
+env_reg<-rename(env_reg, "la_name"="la_name.x")
+
+#Add Buckinghamshire imd dep, calculated mannually to check
+env_reg <- env_reg %>%
+  mutate(
+    `quint_imd` = case_when(
+      la_name == "buckinghamshire" ~ as.integer(1),
+      TRUE ~ `quint_imd`
+    )
+  )
+
+quintile_counts <- env_reg %>%
+  group_by(quint_imd) %>%
+  summarise(num_local_authorities = n_distinct(la_code))
+quintile_counts
+
+
+##### Inpute Pop density 
+
+pop_density<-fread(normalizePath("Data/Population demographics/pop_density_clean_new.csv"))%>%clean_names() 
+pop_density<-pop_density[,-"la_name"]
+pop_density<- subset(pop_density, year > 2008) %>% as.data.table()
+# pop_density<-rename(pop_density,"population_density_sq_km"="value")
+#merge with r05
+class(pop_density$la_code)
+env_reg$year<-as.integer(env_reg$year)
+env_reg<-merge(x=env_reg, y=pop_density, by=c("la_code","year"), all.x = T)
+
+#insert population density 
+env_reg<-as.data.table(env_reg)
+#ID and handle any missing data
+env_regna<-env_reg[is.na(env_reg$population_density_sq_km)]
+env_regna<-env_regna[,c(1,2,3,4,74)]
+na_pop_la<-unique(env_regna$la_name)
+na_pop_la<-as.data.table(na_pop_la)
+
+#corby, daventry, east northamptonshire, kettering, northampton, south northamptonshire2, wellingborough #7 la missing pop density . They have population estimates so will calculate manually #check these are correct 
+#sqkm of corby 80.28km 
+#daventry 662.59
+#east nh 509.79
+#kettering 233.49
+#northampton 80.76
+#south nh 634.02
+#wellingborough 163.04
+#https://www.ons.gov.uk/file?uri=/peoplepopulationandcommunity/populationandmigration/populationestimates/datasets/2011censuspopulationestimatesbyfiveyearagebandsandhouseholdestimatesforlocalauthoritiesintheunitedkingdom/r12ukrttablep04ukv2_tcm77-304141.xls
+
+#add in area of LA for caculation of pop density - round values to match data provided
+
+env_regna<-as.data.table(env_regna)
+class(env_regna)
+env_regna <- env_regna %>%
+  mutate(
+    `area_sq_km` = case_when(
+      la_name == "corby" ~ 80.28,
+      la_name == "daventry" ~ 662.59,
+      la_name == "east northamptonshire" ~ 509.79,
+      la_name == "kettering" ~ 233.49,
+      la_name == "northampton"~ 80.76,
+      la_name == "south northamptonshire" ~ 634.02,
+      la_name == "wellingborough"~ 163.04,
+      )
+  )
+
+env_regna <- env_regna %>%
+  group_by(la_code, year) %>%
+  mutate(
+    population_density_sq_km = round(pop_est_total / area_sq_km, 0)
+  ) %>%
+  ungroup()
+env_regna<-env_regna[c("la_code","year","population_density_sq_km")]
+#join with rest 
+env_reg <- merge(env_reg, env_regna, by = c("la_code", "year"), all.x = TRUE)
+
+env_reg<- env_reg %>%
+  mutate(
+    population_density_sq_km = coalesce(population_density_sq_km.x, population_density_sq_km.y)
+  ) %>%
+  select(-population_density_sq_km.x, -population_density_sq_km.y)
+
+
+#Local authority type from : ro5 2020: https://www.gov.uk/government/statistics/local-authority-revenue-expenditure-and-financing-england-2021-to-2022-individual-local-authority-data-outturn 
+LA_type<-fread(normalizePath("Data/LAcl.csv"))%>%clean_names()
+LA_type<-LA_type[,c(1,2,4)]
+
+LA_type<-LA_type %>% mutate(la_structure = recode(class, "UA" = "unitary_Excluding_London",  "L" = "London_Borough", "SD" = "two_tier", "MD"="unitary_Excluding_London"))
+env_reg<-merge(env_reg, LA_type, by="la_code", all.x = T)
+
+env_reg<-merge(env_reg, LA_type, by="la_code", all.x = T)
+env_reg<-env_reg[,-c("la_type.x","area_sq_km.x","imd_average_rank","imd_rank_of_average_rank","imd_rank_of_average_score","prop_lsoa_most_deprived_10_percent","imd_rank_of_proportion_of_lso_as_in_most_deprived_10_percent_nationally","imd_2019_extent","imd_2019_rank_of_extent","imd_2019_local_concentration","imd_2019_rank_of_local_concentration","la_type.x","area_sq_km.x","la_type.y","area_sq_km.y","la")]
+#write for model ? 
